@@ -5,12 +5,11 @@ const multer     = require('multer');
 const { MongoClient, GridFSBucket, ObjectId } = require('mongodb');
 
 const app    = express();
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB max
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
 app.use(cors());
 app.use(express.json());
 
-// ── MongoDB connection ─────────────────────────────────────────
 let db, bucket;
 
 async function connectDB() {
@@ -21,11 +20,9 @@ async function connectDB() {
   console.log('💕 Connected to MongoDB');
 }
 
-// ── Health check ──────────────────────────────────────────────
 app.get('/', (req, res) => res.json({ status: '💕 P & S backend is live!' }));
 
-// ── GET all photos ────────────────────────────────────────────
-// Returns array of { slot, url } for all 6 gallery slots
+// GET all photos — sorted by slot ascending
 app.get('/photos', async (req, res) => {
   try {
     const rows = await db.collection('gallery').find({}).sort({ slot: 1 }).toArray();
@@ -35,28 +32,24 @@ app.get('/photos', async (req, res) => {
   }
 });
 
-// ── UPLOAD a photo ────────────────────────────────────────────
-// POST /photos/:slot  (slot = 0–5)
-// Body: multipart/form-data with field "photo"
+// UPLOAD — slot can be any non-negative integer now (unlimited)
 app.post('/photos/:slot', upload.single('photo'), async (req, res) => {
   const slot = parseInt(req.params.slot);
-  if (isNaN(slot) || slot < 0 || slot > 5)
-    return res.status(400).json({ error: 'Invalid slot (must be 0–5)' });
+  if (isNaN(slot) || slot < 0)
+    return res.status(400).json({ error: 'Invalid slot' });
 
   if (!req.file)
     return res.status(400).json({ error: 'No file received' });
 
   try {
     const ext      = req.file.mimetype.split('/')[1] || 'jpg';
-    const fileName = `slot-${slot}.${ext}`;
+    const fileName = `slot-${slot}-${Date.now()}.${ext}`;
 
-    // Delete any existing file for this slot from GridFS
-    const existingFiles = await bucket.find({ filename: { $regex: `^slot-${slot}\\.` } }).toArray();
-    for (const f of existingFiles) {
-      await bucket.delete(f._id);
-    }
+    // Delete existing file for this slot
+    const existingFiles = await bucket.find({ filename: { $regex: `^slot-${slot}-` } }).toArray();
+    for (const f of existingFiles) await bucket.delete(f._id);
 
-    // Upload new file to GridFS
+    // Upload new file
     const uploadStream = bucket.openUploadStream(fileName, { contentType: req.file.mimetype });
     await new Promise((resolve, reject) => {
       uploadStream.on('finish', resolve);
@@ -67,7 +60,6 @@ app.post('/photos/:slot', upload.single('photo'), async (req, res) => {
     const fileId    = uploadStream.id.toString();
     const publicUrl = `${process.env.BASE_URL || `http://localhost:${process.env.PORT || 3000}`}/photos/file/${fileId}`;
 
-    // Upsert row in gallery collection
     await db.collection('gallery').updateOne(
       { slot },
       { $set: { slot, url: publicUrl, fileId } },
@@ -80,13 +72,12 @@ app.post('/photos/:slot', upload.single('photo'), async (req, res) => {
   }
 });
 
-// ── SERVE a photo file ────────────────────────────────────────
+// SERVE photo file
 app.get('/photos/file/:id', async (req, res) => {
   try {
     const fileId = new ObjectId(req.params.id);
     const files  = await bucket.find({ _id: fileId }).toArray();
     if (!files.length) return res.status(404).json({ error: 'File not found' });
-
     res.set('Content-Type', files[0].contentType || 'image/jpeg');
     res.set('Cache-Control', 'public, max-age=31536000');
     bucket.openDownloadStream(fileId).pipe(res);
@@ -95,7 +86,7 @@ app.get('/photos/file/:id', async (req, res) => {
   }
 });
 
-// ── DELETE a photo ────────────────────────────────────────────
+// DELETE a photo
 app.delete('/photos/:slot', async (req, res) => {
   const slot = parseInt(req.params.slot);
   try {
@@ -110,7 +101,6 @@ app.delete('/photos/:slot', async (req, res) => {
   }
 });
 
-// ── Start ─────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 connectDB().then(() => {
   app.listen(PORT, () => console.log(`💕 Server running on port ${PORT}`));
